@@ -1,0 +1,1 @@
+packageSearchIndex = [{"l":"All Packages","u":"allpackages-index.html"},{"l":"edu.bu.pas.uno"},{"l":"edu.bu.pas.uno.agents"},{"l":"edu.bu.pas.uno.enums"},{"l":"edu.bu.pas.uno.moves"},{"l":"edu.bu.pas.uno.tree"},{"l":"edu.bu.pas.uno.ui"},{"l":"edu.bu.pas.uno.ui.animations"},{"l":"edu.bu.pas.uno.utils"}];updateSearchResults();
