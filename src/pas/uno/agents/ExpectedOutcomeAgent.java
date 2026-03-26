@@ -4,7 +4,6 @@ package src.pas.uno.agents;
 import edu.bu.pas.uno.Card;
 import edu.bu.pas.uno.Game;
 import edu.bu.pas.uno.Game.GameView;
-import edu.bu.pas.uno.Hand.HandView;
 import edu.bu.pas.uno.agents.Agent;
 import edu.bu.pas.uno.agents.MCTSAgent;
 import edu.bu.pas.uno.enums.Color;
@@ -12,10 +11,10 @@ import edu.bu.pas.uno.enums.Value;
 import edu.bu.pas.uno.moves.Move;
 import edu.bu.pas.uno.tree.Node;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
-
-// JAVA PROJECT IMPORTS
+import java.util.Set;
 
 public class ExpectedOutcomeAgent extends MCTSAgent {
 
@@ -28,28 +27,21 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
         public Node getChild(final Move move) {
             Game childGame = new Game(this.getGameView());
             childGame.setListener(null);
+            injectDummyAgents(childGame);
 
-            try {
-                if (move != null) {
-                    childGame.resolveMove(move);
+            if (move != null) {
+                childGame.resolveMove(move);
+            } else {
+                NodeState state = this.getNodeState();
+                if (state == NodeState.NO_LEGAL_MOVES_UNRESOLVED_CARDS_PRESENT) {
+                    int drawCount = childGame.getUnresolvedCards().total();
+                    childGame.drawTotal(childGame.getHand(this.getLogicalPlayerIdx()), drawCount);
+                    childGame.getUnresolvedCards().clear();
+                    childGame.getPlayerOrder().advance();
                 } else {
-                    NodeState state = this.getNodeState();
-                    if (state == NodeState.NO_LEGAL_MOVES_UNRESOLVED_CARDS_PRESENT) {
-                        int drawCount = childGame.getUnresolvedCards().total();
-                        childGame.drawTotal(childGame.getHand(this.getLogicalPlayerIdx()), drawCount);
-                        childGame.getUnresolvedCards().clear(); // CRITICAL: Clear the buffer!
-                        childGame.getPlayerOrder().advance();
-                    } else if (state == NodeState.NO_LEGAL_MOVES_MAY_PLAY_DRAWN_CARD) {
-                        childGame.getPlayerOrder().advance();
-                    } else {
-                        childGame.getPlayerOrder().advance();
-                    }
+                    childGame.getPlayerOrder().advance();
                 }
-            } catch (Exception e) {
-                System.err.println("[DEBUG-ERROR] Exception in getChild: " + e.getMessage());
-                e.printStackTrace();
             }
-
             return new MCTSNode(childGame.getOmniscientView(), childGame.getPlayerOrder().getCurrentLogicalPlayerIdx(),
                     this);
         }
@@ -61,7 +53,6 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
 
     @Override
     public Node search(final GameView game, final Integer drawnCardIdx) {
-        System.out.println("\n[DEBUG-search] === Starting MCTS Search ===");
         MCTSNode root = new MCTSNode(game, this.getLogicalPlayerIdx(), null);
 
         int numActions = 0;
@@ -69,20 +60,15 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
 
         if (state == Node.NodeState.HAS_LEGAL_MOVES) {
             numActions = root.getOrderedLegalMoves().size();
-            System.out.println("[DEBUG-search] Root state: HAS_LEGAL_MOVES. Total actions: " + numActions);
         } else if (state == Node.NodeState.NO_LEGAL_MOVES_MAY_PLAY_DRAWN_CARD) {
             numActions = 2;
-            System.out.println("[DEBUG-search] Root state: MAY_PLAY_DRAWN_CARD. Total actions: 2");
         } else if (state == Node.NodeState.NO_LEGAL_MOVES_UNRESOLVED_CARDS_PRESENT) {
             numActions = 1;
-            System.out.println("[DEBUG-search] Root state: UNRESOLVED_CARDS_PRESENT. Total actions: 1");
         }
 
         if (numActions == 0)
             return root;
 
-        // BUMPED BUFFER: 150ms buffer to guarantee we return before the framework kills
-        // the thread
         long endTime = System.currentTimeMillis() + this.getMaxThinkingTimeInMS() - 150;
 
         Node[] children = new Node[numActions];
@@ -92,49 +78,38 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
                 children[i] = root.getChild(move);
             }
         } catch (Exception e) {
-            System.err.println("[DEBUG-ERROR] Exception while pre-computing children!");
-            e.printStackTrace();
-            return root; // Return early if it fails
+            return root;
         }
 
-        int totalSims = 0;
-
-        System.out.println("[DEBUG-search] Running round-robin rollout simulations...");
+        int maxDepth = 1;
         while (!Thread.currentThread().isInterrupted() && System.currentTimeMillis() < endTime) {
             for (int actionIdx = 0; actionIdx < numActions; actionIdx++) {
                 if (System.currentTimeMillis() >= endTime || Thread.currentThread().isInterrupted())
                     break;
 
                 try {
-                    Game simGame = new Game(children[actionIdx].getGameView());
-                    simGame.setListener(null);
+                    Game childGame = new Game(children[actionIdx].getGameView());
+                    childGame.setListener(null);
+                    injectDummyAgents(childGame);
 
-                    float utility = playRandomGame(simGame);
+                    float qValue = alphaBeta(childGame, maxDepth, -1000.0f, 1000.0f, endTime);
 
-                    root.setQValueTotal(actionIdx, root.getQValueTotal(actionIdx) + utility);
+                    root.setQValueTotal(actionIdx, root.getQValueTotal(actionIdx) + qValue);
                     root.setQCount(actionIdx, root.getQCount(actionIdx) + 1);
-                    totalSims++;
                 } catch (Exception e) {
-                    System.err.println("[DEBUG-ERROR] Exception during random rollout on action " + actionIdx);
-                    e.printStackTrace();
-                    // Break out of loop to ensure we return safely
                     break;
                 }
             }
+            maxDepth++;
+            if (maxDepth > 3)
+                break;
         }
 
-        System.out.println("[DEBUG-search] Completed " + totalSims + " total simulations.");
-        for (int i = 0; i < numActions; i++) {
-            float avgQ = root.getQCount(i) == 0 ? 0 : root.getQValueTotal(i) / root.getQCount(i);
-            System.out.println(
-                    "[DEBUG-search] Action " + i + " -> Count: " + root.getQCount(i) + ", Avg Q-Value: " + avgQ);
-        }
         return root;
     }
 
     @Override
     public Move argmaxQValues(final Node node) {
-        System.out.println("[DEBUG-argmax] Evaluating best move...");
         Node.NodeState state = node.getNodeState();
         int numActions = 0;
 
@@ -160,12 +135,231 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
             }
         }
 
-        Move finalMove = getMoveForActionIdx(node, bestIdx, null);
-        System.out.println("[DEBUG-argmax] Chose action index " + bestIdx + " -> Final Move: " + finalMove);
-        return finalMove;
+        return getMoveForActionIdx(node, bestIdx, null);
     }
 
-    // --- HELPER METHODS ---
+    // ==========================================================
+    // MINIMAX / ALPHA-BETA CORE ALGORITHM
+    // ==========================================================
+
+    private float alphaBeta(Game game, int depth, float alpha, float beta, long endTime) {
+        if (System.currentTimeMillis() >= endTime || Thread.currentThread().isInterrupted()) {
+            return 0.0f;
+        }
+        if (game.isOver()) {
+            return evaluateTerminalState(game);
+        }
+        if (depth == 0) {
+            return runRollouts(game, 3, endTime);
+        }
+
+        int currLogicalIdx = game.getPlayerOrder().getCurrentLogicalPlayerIdx();
+        boolean isMaximizing = (currLogicalIdx == this.getLogicalPlayerIdx());
+
+        List<Game> nextStates = generateNextStates(game, currLogicalIdx);
+
+        if (isMaximizing) {
+            float maxEval = -1000.0f;
+            for (Game childState : nextStates) {
+                float eval = alphaBeta(childState, depth - 1, alpha, beta, endTime);
+                maxEval = Math.max(maxEval, eval);
+                alpha = Math.max(alpha, eval);
+                if (beta <= alpha)
+                    break;
+            }
+            return maxEval;
+        } else {
+            float minEval = 1000.0f;
+            for (Game childState : nextStates) {
+                float eval = alphaBeta(childState, depth - 1, alpha, beta, endTime);
+                minEval = Math.min(minEval, eval);
+                beta = Math.min(beta, eval);
+                if (beta <= alpha)
+                    break;
+            }
+            return minEval;
+        }
+    }
+
+    // ==========================================================
+    // HELPER METHODS
+    // ==========================================================
+
+    private boolean isCardWild(Card c) {
+        if (c == null)
+            return false;
+        if (c.isWild())
+            return true;
+        if (c.value() == Value.WILD || c.value() == Value.WILD_DRAW_FOUR)
+            return true;
+        return false;
+    }
+
+    private Color getValidRandomColor() {
+        Color[] validColors = { Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW };
+        return validColors[this.getRandom().nextInt(validColors.length)];
+    }
+
+    private List<Game> generateNextStates(Game game, int logicalIdx) {
+        List<Game> states = new ArrayList<>();
+        try {
+            if (game.getUnresolvedCards().total() > 0) {
+                Game next = new Game(game.getOmniscientView());
+                next.setListener(null);
+                injectDummyAgents(next);
+
+                int drawCount = next.getUnresolvedCards().total();
+                next.drawTotal(next.getHand(logicalIdx), drawCount);
+                next.getUnresolvedCards().clear();
+                next.getPlayerOrder().advance();
+                states.add(next);
+                return states;
+            }
+
+            Set<Integer> legalMoves = game.getOmniscientView().getHandView(logicalIdx)
+                    .getLegalMoves(game.getOmniscientView());
+            if (!legalMoves.isEmpty()) {
+                for (int moveIdx : legalMoves) {
+                    Card c = game.getOmniscientView().getHandView(logicalIdx).getCard(moveIdx);
+
+                    if (isCardWild(c)) {
+                        Color[] colors = { Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW };
+                        for (Color color : colors) {
+                            Game next = new Game(game.getOmniscientView());
+                            next.setListener(null);
+                            injectDummyAgents(next);
+
+                            Agent nextAgent = next.getAgent(logicalIdx);
+                            Move m = Move.createMove(nextAgent, moveIdx, color);
+                            next.resolveMove(m);
+                            states.add(next);
+                        }
+                    } else {
+                        Game next = new Game(game.getOmniscientView());
+                        next.setListener(null);
+                        injectDummyAgents(next);
+
+                        Agent nextAgent = next.getAgent(logicalIdx);
+                        Move m = Move.createMove(nextAgent, moveIdx);
+                        next.resolveMove(m);
+                        states.add(next);
+                    }
+                }
+            } else {
+                Game nextKeep = new Game(game.getOmniscientView());
+                nextKeep.setListener(null);
+                injectDummyAgents(nextKeep);
+
+                nextKeep.drawCard(nextKeep.getHand(logicalIdx));
+                GameView postDrawView = nextKeep.getOmniscientView();
+                int drawnIdx = postDrawView.getHandView(logicalIdx).size() - 1;
+                Set<Integer> postDrawLegal = postDrawView.getHandView(logicalIdx).getLegalMoves(postDrawView);
+
+                if (postDrawLegal.contains(drawnIdx)) {
+                    Card c = postDrawView.getHandView(logicalIdx).getCard(drawnIdx);
+                    if (isCardWild(c)) {
+                        Color[] colors = { Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW };
+                        for (Color color : colors) {
+                            Game nextPlay = new Game(nextKeep.getOmniscientView());
+                            nextPlay.setListener(null);
+                            injectDummyAgents(nextPlay);
+
+                            Agent nextAgent = nextPlay.getAgent(logicalIdx);
+                            Move m = Move.createMove(nextAgent, drawnIdx, color);
+                            nextPlay.resolveMove(m);
+                            states.add(nextPlay);
+                        }
+                    } else {
+                        Game nextPlay = new Game(nextKeep.getOmniscientView());
+                        nextPlay.setListener(null);
+                        injectDummyAgents(nextPlay);
+
+                        Agent nextAgent = nextPlay.getAgent(logicalIdx);
+                        Move m = Move.createMove(nextAgent, drawnIdx);
+                        nextPlay.resolveMove(m);
+                        states.add(nextPlay);
+                    }
+                }
+                nextKeep.getPlayerOrder().advance();
+                states.add(nextKeep);
+            }
+        } catch (Exception e) {
+        }
+        return states;
+    }
+
+    private float runRollouts(Game state, int numRollouts, long endTime) {
+        float totalUtility = 0.0f;
+        for (int i = 0; i < numRollouts; i++) {
+            if (System.currentTimeMillis() >= endTime)
+                break;
+
+            Game simGame = new Game(state.getOmniscientView());
+            simGame.setListener(null);
+            injectDummyAgents(simGame);
+            totalUtility += playSingleRandomGame(simGame);
+        }
+        return totalUtility / Math.max(1, numRollouts);
+    }
+
+    private float playSingleRandomGame(Game simGame) {
+        int maxDepth = 250;
+        int depth = 0;
+
+        while (!simGame.isOver() && depth < maxDepth && !Thread.currentThread().isInterrupted()) {
+            int currLogicalIdx = simGame.getPlayerOrder().getCurrentLogicalPlayerIdx();
+            GameView view = simGame.getOmniscientView();
+
+            if (simGame.getUnresolvedCards().total() > 0) {
+                int drawCount = simGame.getUnresolvedCards().total();
+                simGame.drawTotal(simGame.getHand(currLogicalIdx), drawCount);
+                simGame.getUnresolvedCards().clear();
+                simGame.getPlayerOrder().advance();
+            } else {
+                Set<Integer> legalMovesSet = view.getHandView(currLogicalIdx).getLegalMoves(view);
+
+                if (!legalMovesSet.isEmpty()) {
+                    List<Integer> legal = new ArrayList<>(legalMovesSet);
+                    int randMoveIdx = legal.get(this.getRandom().nextInt(legal.size()));
+                    Card c = view.getHandView(currLogicalIdx).getCard(randMoveIdx);
+
+                    Agent currAgent = simGame.getAgent(currLogicalIdx);
+                    Move randomMove = isCardWild(c) ? Move.createMove(currAgent, randMoveIdx, getValidRandomColor())
+                            : Move.createMove(currAgent, randMoveIdx);
+
+                    simGame.resolveMove(randomMove);
+                } else {
+                    simGame.drawCard(simGame.getHand(currLogicalIdx));
+                    GameView postDrawView = simGame.getOmniscientView();
+                    Set<Integer> postDrawLegal = postDrawView.getHandView(currLogicalIdx).getLegalMoves(postDrawView);
+                    int drawnCardIdx = postDrawView.getHandView(currLogicalIdx).size() - 1;
+
+                    if (postDrawLegal.contains(drawnCardIdx) && this.getRandom().nextBoolean()) {
+                        Card c = postDrawView.getHandView(currLogicalIdx).getCard(drawnCardIdx);
+                        Agent currAgent = simGame.getAgent(currLogicalIdx);
+
+                        Move randomMove = isCardWild(c)
+                                ? Move.createMove(currAgent, drawnCardIdx, getValidRandomColor())
+                                : Move.createMove(currAgent, drawnCardIdx);
+                        simGame.resolveMove(randomMove);
+                    } else {
+                        simGame.getPlayerOrder().advance();
+                    }
+                }
+            }
+            depth++;
+        }
+        return evaluateTerminalState(simGame);
+    }
+
+    private float evaluateTerminalState(Game game) {
+        for (int i = 0; i < game.getNumPlayers(); i++) {
+            if (game.getOmniscientView().getHandView(i).size() == 0) {
+                return (i == this.getLogicalPlayerIdx()) ? 1.0f : -1.0f;
+            }
+        }
+        return 0.0f;
+    }
 
     private Move getMoveForActionIdx(Node node, int actionIdx, Integer drawnCardIdx) {
         Node.NodeState state = node.getNodeState();
@@ -176,8 +370,8 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
             int cardIdx = node.getOrderedLegalMoves().get(actionIdx);
             Card c = view.getHandView(currLogicalIdx).getCard(cardIdx);
 
-            if (c.isWild()) {
-                return Move.createMove(this, cardIdx, Color.getRandomColor(this.getRandom()));
+            if (isCardWild(c)) {
+                return Move.createMove(this, cardIdx, getValidRandomColor());
             } else {
                 return Move.createMove(this, cardIdx);
             }
@@ -185,87 +379,33 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
             if (actionIdx == 1) {
                 int cIdx = (drawnCardIdx != null) ? drawnCardIdx : (view.getHandView(currLogicalIdx).size() - 1);
                 Card c = view.getHandView(currLogicalIdx).getCard(cIdx);
-                if (c.isWild()) {
-                    return Move.createMove(this, cIdx, Color.getRandomColor(this.getRandom()));
+                if (isCardWild(c)) {
+                    return Move.createMove(this, cIdx, getValidRandomColor());
                 } else {
                     return Move.createMove(this, cIdx);
                 }
-            } else {
-                return null;
             }
         }
-
         return null;
     }
 
-    private float playRandomGame(Game simGame) {
-        int maxDepth = 250;
-        int depth = 0;
+    public static void injectDummyAgents(Game game) {
+        try {
+            java.lang.reflect.Field agentsField = Game.class.getDeclaredField("agents");
+            agentsField.setAccessible(true);
+            Object currentAgents = agentsField.get(game);
 
-        while (!simGame.isOver() && depth < maxDepth && !Thread.currentThread().isInterrupted()) {
-            int currLogicalIdx = simGame.getPlayerOrder().getCurrentLogicalPlayerIdx();
-            GameView view = simGame.getOmniscientView();
-            Node simNode = new MCTSNode(view, currLogicalIdx, null);
-            Node.NodeState state = simNode.getNodeState();
-
-            Move randomMove = null;
-
-            if (state == Node.NodeState.HAS_LEGAL_MOVES) {
-                List<Integer> legal = simNode.getOrderedLegalMoves();
-                int randMoveIdx = legal.get(this.getRandom().nextInt(legal.size()));
-                Card c = view.getHandView(currLogicalIdx).getCard(randMoveIdx);
-
-                // Get the proper Agent for this turn, fallback to 'this' if null
-                Agent currentAgent = simGame.getAgent(currLogicalIdx);
-                if (currentAgent == null)
-                    currentAgent = this;
-
-                if (c.isWild()) {
-                    randomMove = Move.createMove(currentAgent, randMoveIdx, Color.getRandomColor(this.getRandom()));
-                } else {
-                    randomMove = Move.createMove(currentAgent, randMoveIdx);
+            if (currentAgents == null) {
+                Agent[] dummyAgents = new Agent[game.getNumPlayers()];
+                for (int i = 0; i < dummyAgents.length; i++) {
+                    int realIdx = game.getPlayerOrder().getAgentIdx(i);
+                    ExpectedOutcomeAgent dummy = new ExpectedOutcomeAgent(realIdx, 100);
+                    dummy.setRandom(new Random());
+                    dummyAgents[i] = dummy;
                 }
-                simGame.resolveMove(randomMove);
-
-            } else if (state == Node.NodeState.NO_LEGAL_MOVES_MAY_PLAY_DRAWN_CARD) {
-                boolean playDrawnCard = this.getRandom().nextBoolean();
-                if (playDrawnCard) {
-                    int lastIdx = view.getHandView(currLogicalIdx).size() - 1;
-                    Card c = view.getHandView(currLogicalIdx).getCard(lastIdx);
-
-                    Agent currentAgent = simGame.getAgent(currLogicalIdx);
-                    if (currentAgent == null)
-                        currentAgent = this;
-
-                    if (c.isWild()) {
-                        randomMove = Move.createMove(currentAgent, lastIdx, Color.getRandomColor(this.getRandom()));
-                    } else {
-                        randomMove = Move.createMove(currentAgent, lastIdx);
-                    }
-                    simGame.resolveMove(randomMove);
-                } else {
-                    simGame.getPlayerOrder().advance();
-                }
-
-            } else if (state == Node.NodeState.NO_LEGAL_MOVES_UNRESOLVED_CARDS_PRESENT) {
-                int drawCount = simGame.getUnresolvedCards().total();
-                simGame.drawTotal(simGame.getHand(currLogicalIdx), drawCount);
-                simGame.getUnresolvedCards().clear(); // CRITICAL: Clear the buffer
-                simGame.getPlayerOrder().advance();
+                agentsField.set(game, dummyAgents);
             }
-            depth++;
+        } catch (Exception e) {
         }
-
-        for (int i = 0; i < simGame.getNumPlayers(); i++) {
-            if (simGame.getOmniscientView().getHandView(i).size() == 0) {
-                if (i == this.getLogicalPlayerIdx()) {
-                    return 1.0f; // Win
-                } else {
-                    return -1.0f; // Loss
-                }
-            }
-        }
-
-        return 0.0f; // Tie
     }
 }
