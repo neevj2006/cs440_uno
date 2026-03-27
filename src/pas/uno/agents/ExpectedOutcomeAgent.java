@@ -101,8 +101,6 @@ public class ExpectedOutcomeAgent extends MCTSAgent {
                 }
             }
             maxDepth++;
-            if (maxDepth > 3)
-                break;
         }
 
         return root;
