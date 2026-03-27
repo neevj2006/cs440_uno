@@ -156,13 +156,17 @@ public class UnoMCTSAgent extends MCTSAgent {
     @Override
     public Node search(final GameView game, final Integer drawnCardIdx) {
         MCTSNode root = new MCTSNode(game, this.getLogicalPlayerIdx(), null);
-
-        long allowedTime = this.getMaxThinkingTimeInMS() > 0 ? this.getMaxThinkingTimeInMS() : 1000;
-        long endTime = System.currentTimeMillis() + Math.min(allowedTime, 900);
+        long endTime = System.currentTimeMillis() + (this.getMaxThinkingTimeInMS() - 200);
+        
+        System.out.println("search entered");
+        System.out.println("current time = " + System.currentTimeMillis() + " endtime = " + endTime);
+        System.out.println("root numActions=" + root.numActions + " state=" + root.getNodeState());
 
         while (System.currentTimeMillis() < endTime && !Thread.currentThread().isInterrupted()) {
+            System.out.println("top of MCTS loop");
             Game sampledGame = createSampledGame(game);
             if (sampledGame == null)
+                System.out.println("sampledGame is null");
                 break;
 
             sampledGame.setListener(null);
@@ -187,8 +191,9 @@ public class UnoMCTSAgent extends MCTSAgent {
                     curr = child;
                 }
             }
-
+            System.out.println("before rollout");
             float reward = runRollout(sampledGame);
+            System.out.println("after rollout reward=" + reward);
 
             MCTSNode back = curr;
             while (back != null) {
@@ -282,6 +287,7 @@ public class UnoMCTSAgent extends MCTSAgent {
                     applyMoveSafely(g, createValidMoveWithColor(v, curr, randIdx), curr);
                 }
             }
+            System.out.println(depth);
             depth++;
         }
 
@@ -311,6 +317,7 @@ public class UnoMCTSAgent extends MCTSAgent {
     public Game createSampledGame(GameView view) {
         try {
             if (realGameField == null)
+                System.out.println("realGameField is null");
                 return null;
             Game real = (Game) realGameField.get(view);
             Game sampled = new Game(real.getOmniscientView());
@@ -352,6 +359,8 @@ public class UnoMCTSAgent extends MCTSAgent {
             }
             return sampled;
         } catch (Exception e) {
+            System.out.println("createSampledGame failed");
+            e.printStackTrace();
             return null;
         }
     }
